@@ -115,7 +115,7 @@ flowchart TD
 
 | # | Estado | Fecha | Notas |
 |:-:|:-:|---|---|
-| 00 | ⬜ | | |
+| 00 | 🟦 | 1 oct | Entorno de Claude en la nube listo (Go 1.27.1, Docker, sqlc, golangci-lint, gopls, govulncheck). Falta tu máquina |
 | 01 | ⬜ | | |
 | 02 | ⬜ | | |
 | 03 | ⬜ | | |

@@ -144,7 +144,7 @@ cd canjes-api
 Ejecuta y compara:
 
 ```bash
-go version                 # go version go1.2x.x …   (la estable más reciente)
+go version                 # go1.27.1 o superior (estable más reciente al 1 oct 2026)
 git --version              # git version 2.x
 docker run --rm hello-world   # "Hello from Docker!"
 docker compose version     # Docker Compose version v2.x
@@ -168,6 +168,8 @@ govulncheck -version       # Go: go1.2x …
 | `gopls: command not found` después de instalarlo | `$(go env GOPATH)/bin` no está en el `PATH` | Agrega la línea del paso 2 a tu `~/.zshrc`/`~/.bashrc` y abre otra terminal |
 | `Cannot connect to the Docker daemon` | Docker Desktop no está abierto | Ábrelo y espera a que diga "running" |
 | En Windows todo es lento o raro con rutas | Trabajas fuera de WSL2 | Clona el repo dentro de WSL2 (`/home/<tú>/code`), no en `C:\` |
+| `docker run hello-world` falla con `429 Too Many Requests` | Docker Hub limita descargas anónimas | No es problema de tu instalación: espera unos minutos o inicia sesión con `docker login`. Prueba con `docker run --rm postgres:17-alpine postgres --version` |
+| Tu Go es más viejo que el del proyecto | Versión instalada anterior a la de `go.mod` | No hace falta reinstalar: con `GOTOOLCHAIN=auto` (por defecto) Go descarga la versión correcta solo |
 | Mac con chip M1/M2/M3 | Imágenes `arm64` vs servidores `amd64` | No afecta aquí; se resuelve al construir en el playbook 13 |
 
 ---
