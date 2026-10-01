@@ -1,0 +1,18 @@
+# Binarios y artefactos de compilación
+/bin/
+*.test
+*.out
+coverage.*
+
+# Configuración local con secretos
+.env
+.env.*
+!.env.example
+
+# Sistema y editores
+.DS_Store
+.idea/
+.vscode/
+/tmp/
+
+# Nota: el código generado (internal/httpapi/gen, internal/store/db) SÍ se versiona.

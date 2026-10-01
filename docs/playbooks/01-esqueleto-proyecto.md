@@ -150,7 +150,7 @@ El Makefile carga `.env` con `-include .env` + `export` para que `make run` y `m
 
 ### 9. `.golangci.yml` (formato v2)
 
-Linters por defecto + `gosec`, `errorlint`, `bodyclose`, `rowserrcheck`, `noctx`, `contextcheck`, `misspell`, `revive`. Excluir carpetas generadas (`internal/httpapi/gen`, `internal/store/db`).
+Linters por defecto + `gosec`, `errorlint`, `bodyclose`, `rowserrcheck`, `noctx`, `contextcheck`, `revive`. **Sin `misspell`**: revisa ortografía en inglés y marca como error todo el texto en español ("comando", "argumentos"). Excluir carpetas generadas (`internal/httpapi/gen`, `internal/store/db`).
 
 ### 10. `README.md` del repo
 
@@ -182,6 +182,7 @@ go tool oapi-codegen -version && go tool goose -version
 |---|---|---|
 | `port 5432 already in use` | Ya tienes otro Postgres instalado | Detenlo o cambia el puerto a `"5433:5432"` y ajusta `DATABASE_URL` |
 | `go: cannot find main module` | No estás en la carpeta del repo | `cd` a la raíz (donde está `go.mod`) |
+| `golangci-lint` dice que su versión de Go es menor que la del proyecto | Se instaló un binario compilado con un Go anterior | `make tools` (lo compila con el Go del proyecto) |
 | `make: *** missing separator` | El Makefile usa espacios en vez de tabuladores | Las recetas del Makefile **deben** empezar con TAB |
 
 ---

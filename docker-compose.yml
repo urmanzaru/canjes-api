@@ -1,0 +1,20 @@
+# Postgres local para desarrollo. Usa la misma versión mayor que producción.
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: canjes
+      POSTGRES_PASSWORD: canjes
+      POSTGRES_DB: canjes
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U canjes -d canjes"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+volumes:
+  pgdata:
