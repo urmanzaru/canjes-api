@@ -1,0 +1,10 @@
+# Genera internal/httpapi/gen a partir de api/openapi.yaml. Se ejecuta con `make generate`.
+package: gen
+output: internal/httpapi/gen/api.gen.go
+generate:
+  models: true
+  std-http-server: true # net/http estándar (ServeMux con patrones de Go 1.22+)
+  strict-server: true   # handlers tipados: reciben y devuelven structs
+  embedded-spec: true   # el contrato queda dentro del binario (validación en pruebas)
+output-options:
+  nullable-type: false

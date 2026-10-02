@@ -117,7 +117,7 @@ flowchart TD
 |:-:|:-:|---|---|
 | 00 | 🟦 | 1 oct | Entorno de Claude en la nube listo (Go 1.27.1, Docker, sqlc, golangci-lint, gopls, govulncheck). Falta tu máquina |
 | 01 | ✅ | 1 oct | Módulo con Go 1.27.1, estructura, Makefile, Postgres 17 en Docker, lint en verde |
-| 02 | ⬜ | | |
+| 02 | ✅ | 2 oct | `api/openapi.yaml` + código generado (12 métodos) + prueba de contrato. `INVALID_STATE` propuesto, pendiente en el SD |
 | 03 | ⬜ | | |
 | 04 | ⬜ | | |
 | 05 | ⬜ | | |

@@ -151,6 +151,7 @@ Manda `api/openapi.yaml` (o el enlace al archivo en GitHub) a quien integra Empr
 - [ ] `StrictServerInterface` tiene **12 métodos**: los 10 endpoints de `/v1` + `healthz` + `readyz`.
 - [ ] Cada error de las tablas de SD §5.2 aparece documentado en el endpoint correcto.
 - [ ] Los ejemplos del YAML coinciden con los JSON del SD.
+- [ ] `go test ./internal/httpapi/` pasa: `contract_test.go` verifica que el YAML sea válido, que cada ruta `/v1` tenga `x-required-scope` válido y respuestas 401/403/500, y que todo error use `ApiError`.
 
 ---
 
@@ -160,6 +161,8 @@ Manda `api/openapi.yaml` (o el enlace al archivo en GitHub) a quien integra Empr
 |---|---|---|
 | `oapi-codegen` falla con `unsupported` | Se usó una función de OpenAPI 3.1 | Quedarse en `3.0.3` (`nullable: true` en vez de `type: [x, "null"]`) |
 | Tipos con nombres raros (`N200Response…`) | Respuestas sin esquema con nombre | Definir todo en `components/schemas` y referenciar con `$ref` |
+| Redocly: `nullable-type-sibling` | Un `$ref` envuelto en `allOf` con `nullable: true` sin `type` | Agregar `type: object` junto al `allOf` |
+| `staticcheck`: `GetSwagger is deprecated` | Nombre viejo de la función generada | Usar `gen.GetSpec()` |
 | Al editar `api.gen.go` se pierde el cambio | Es generado | Nunca se edita; se cambia el YAML y se regenera |
 
 ---

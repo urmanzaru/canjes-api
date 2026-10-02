@@ -1,0 +1,885 @@
+openapi: 3.0.3
+info:
+  title: canjes-api
+  version: 1.0.0
+  description: |
+    API de emisión y canje de códigos de promoción de un solo uso.
+
+    - **Fuente de verdad:** `docs/SYSTEM_DESIGN.md` (§5). Este archivo es el contrato HTTP (D2):
+      se edita aquí y se regenera el código con `make generate`.
+    - **Autenticación:** encabezado `X-Api-Key: ck_live_<32 caracteres>`. Cada key tiene permisos
+      (scopes); la extensión `x-required-scope` de cada operación indica cuál necesita.
+      Sin key o key inválida → 401 `UNAUTHORIZED`; sin el scope → 403 `FORBIDDEN`.
+    - **Convenciones:** JSON en `camelCase`; fechas RFC 3339 en UTC; IDs UUID.
+    - **Errores:** siempre `{ "error": "CODIGO", "message": "Texto en español listo para mostrar" }`.
+      Las apps deciden por `error` y pueden mostrar `message` tal cual (D13).
+    - **`X-Request-Id`:** si la app lo envía se respeta; si no, se genera. Siempre se devuelve.
+    - **Versionado:** rutas con `/v1`; un cambio incompatible va a `/v2` (D12).
+  contact:
+    name: Uriel Manzano
+servers:
+  - url: http://localhost:8080
+    description: Desarrollo local
+  - url: https://canjes.example.com
+    description: Producción (dominio definitivo pendiente, decisión A1)
+
+security:
+  - ApiKeyAuth: []
+
+tags:
+  - name: apps
+    description: Endpoints para las apps emisoras (Emprende con Flow) y destino (VisorUS POS)
+  - name: admin
+    description: Consulta y operación interna (scope `admin`)
+  - name: ops
+    description: Salud del servicio (sin autenticación)
+
+paths:
+  /v1/offers:
+    get:
+      operationId: listOffers
+      tags: [apps]
+      summary: Ofertas disponibles para la app emisora
+      description: |
+        Devuelve las ofertas activas de la campaña `ACTIVE` en la que la app que llama es emisora,
+        con el estado de la persona en cada una. Si no viene `holderRef`, `holder` va en `null`.
+        Si la app no tiene campaña activa, `campaign` es `null` y `data` está vacío.
+      x-required-scope: offers:read
+      parameters:
+        - $ref: "#/components/parameters/HolderRefOptional"
+      responses:
+        "200":
+          description: Ofertas de la campaña activa
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OfferList"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /v1/codes:
+    post:
+      operationId: issueCode
+      tags: [apps]
+      summary: Emitir un código para una persona y una oferta
+      description: |
+        Emite un código de 40 dígitos de un solo uso. **El código completo solo aparece en esta
+        respuesta**; en la base se guarda su hash.
+
+        Si la persona ya tenía un código vigente para esa oferta, se revoca y se emite uno nuevo
+        (`reissued: true`). Reintentar es siempre seguro (D7).
+
+        **Para la app emisora:** descontar los puntos solo después de recibir `201`.
+
+        Errores:
+        - `404 OFFER_NOT_FOUND` — no existe, está inactiva o es de una campaña de otra app emisora.
+        - `410 CAMPAIGN_NOT_ACTIVE` — fuera de fechas de emisión o campaña no activa.
+        - `409 HOLDER_LIMIT_REACHED` — la persona ya canjeó el máximo permitido de esa oferta.
+        - `409 OFFER_SOLD_OUT` — se alcanzó el cupo total de la oferta.
+        - `422 VALIDATION_ERROR` — falta `offerId` o `holderRef`, o `holderRef` mide más de 128.
+        - `429 TOO_MANY_ATTEMPTS` — más de 30 emisiones por minuto con la misma key.
+      x-required-scope: codes:issue
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/IssueCodeRequest"
+      responses:
+        "201":
+          description: Código emitido
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IssuedCode"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "410": { $ref: "#/components/responses/Gone" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    get:
+      operationId: listHolderCodes
+      tags: [apps]
+      summary: Códigos de una persona (sin el código completo)
+      description: |
+        Para reconstruir "Mis canjes" tras reinstalar. Nunca devuelve el código completo: si un
+        código está `ISSUED` y la persona perdió el número, la app vuelve a llamar `POST /v1/codes`.
+      x-required-scope: codes:issue
+      parameters:
+        - $ref: "#/components/parameters/HolderRefRequired"
+      responses:
+        "200":
+          description: Códigos de la persona, del más reciente al más antiguo
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HolderCodeList"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /v1/codes/validate:
+    post:
+      operationId: validateCode
+      tags: [apps]
+      summary: Validar un código sin cambiar nada
+      description: |
+        Comprueba formato (40 dígitos + Luhn, sin consultar la base), existencia, que sea de la app
+        que pregunta y que esté vigente. **No aparta el código**: el canje vuelve a verificar todo.
+        Acepta espacios, guiones y un salto de línea al final.
+
+        Errores (el `message` está listo para mostrar):
+        - `422 INVALID_CODE_FORMAT` — "Revisa el código: parece que hay un dígito mal escrito."
+        - `404 CODE_NOT_FOUND` — "Este código no es válido para esta app." (también si es de otra app)
+        - `409 CODE_ALREADY_REDEEMED` — "Este código ya fue canjeado."
+        - `410 CODE_REVOKED` — "Este código ya no es válido. Pide uno nuevo en Emprende con Flow."
+        - `410 CODE_EXPIRED` — "Este código venció."
+        - `429 TOO_MANY_ATTEMPTS` — "Demasiados intentos. Espera un minuto."
+      x-required-scope: codes:redeem
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ValidateCodeRequest"
+      responses:
+        "200":
+          description: El código es válido en este momento
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ValidateCodeResponse"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "410": { $ref: "#/components/responses/Gone" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /v1/codes/redeem:
+    post:
+      operationId: redeemCode
+      tags: [apps]
+      summary: Canjear un código con el correo de la persona
+      description: |
+        Marca el código como `REDEEMED` en una sola operación atómica: si dos canjes llegan a la
+        vez, uno gana y el otro recibe `409 CODE_ALREADY_REDEEMED`. El correo se guarda en minúsculas.
+
+        Errores: los mismos de `validate`, más:
+        - `409 EMAIL_ALREADY_REDEEMED` — "Este correo ya recibió esta promoción."
+        - `422 VALIDATION_ERROR` — correo inválido o falta algún campo (p. ej. `emailConsentAt`).
+      x-required-scope: codes:redeem
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RedeemCodeRequest"
+      responses:
+        "200":
+          description: Código canjeado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RedeemCodeResponse"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "410": { $ref: "#/components/responses/Gone" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /v1/admin/codes:
+    get:
+      operationId: adminListCodes
+      tags: [admin]
+      summary: Listar o exportar códigos
+      description: |
+        Lista paginada (`format=json`) o exportación completa de lo filtrado (`format=csv`, ignora
+        `size` y `offset`). Incluye correo y `redeemerRef`: manejar con cuidado.
+      x-required-scope: admin
+      parameters:
+        - name: campaign
+          in: query
+          description: Slug de la campaña
+          schema: { type: string, maxLength: 128 }
+        - name: offer
+          in: query
+          description: Slug de la oferta
+          schema: { type: string, maxLength: 128 }
+        - name: status
+          in: query
+          schema:
+            $ref: "#/components/schemas/CodeStatus"
+        - $ref: "#/components/parameters/PageSize"
+        - $ref: "#/components/parameters/PageOffset"
+        - name: format
+          in: query
+          schema:
+            type: string
+            enum: [json, csv]
+            default: json
+      responses:
+        "200":
+          description: Página de códigos (JSON) o archivo CSV
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminCodePage"
+            text/csv:
+              schema:
+                type: string
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /v1/admin/codes/{id}/events:
+    get:
+      operationId: adminListCodeEvents
+      tags: [admin]
+      summary: Bitácora de un código
+      x-required-scope: admin
+      parameters:
+        - $ref: "#/components/parameters/CodeID"
+      responses:
+        "200":
+          description: Eventos en orden cronológico
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CodeEventList"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /v1/admin/codes/{id}/fulfill:
+    post:
+      operationId: adminFulfillCode
+      tags: [admin]
+      summary: Marcar como entregado (REDEEMED → FULFILLED)
+      description: |
+        - `404 CODE_NOT_FOUND` — no existe.
+        - `409 INVALID_STATE` — el código no está `REDEEMED` (propuesto; pendiente de agregar al SD §5.3).
+      x-required-scope: admin
+      parameters:
+        - $ref: "#/components/parameters/CodeID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FulfillCodeRequest"
+      responses:
+        "200":
+          description: Código entregado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminCode"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /v1/admin/codes/{id}/revoke:
+    post:
+      operationId: adminRevokeCode
+      tags: [admin]
+      summary: Revocar un código sin canjear (ISSUED → REVOKED)
+      description: |
+        Un canje no se deshace: no se puede revocar un código `REDEEMED` o `FULFILLED` (SD §3.1).
+        - `404 CODE_NOT_FOUND` — no existe.
+        - `409 INVALID_STATE` — el código no está `ISSUED` (propuesto; pendiente de agregar al SD §5.3).
+      x-required-scope: admin
+      parameters:
+        - $ref: "#/components/parameters/CodeID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RevokeCodeRequest"
+      responses:
+        "200":
+          description: Código revocado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminCode"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /v1/admin/stats:
+    get:
+      operationId: adminStats
+      tags: [admin]
+      summary: Totales por oferta de una campaña
+      x-required-scope: admin
+      parameters:
+        - name: campaign
+          in: query
+          required: true
+          description: Slug de la campaña
+          schema: { type: string, minLength: 1, maxLength: 128 }
+      responses:
+        "200":
+          description: Totales por oferta
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CampaignStats"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /healthz:
+    get:
+      operationId: healthz
+      tags: [ops]
+      summary: El proceso está vivo
+      security: []
+      responses:
+        "200":
+          description: Vivo
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+
+  /readyz:
+    get:
+      operationId: readyz
+      tags: [ops]
+      summary: El proceso puede atender (hay conexión con Postgres)
+      security: []
+      responses:
+        "200":
+          description: Listo
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+        "503":
+          description: Sin conexión con la base de datos
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+              example: { error: NOT_READY, message: "El servicio no está listo." }
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-Api-Key
+      description: "`ck_live_` + 32 caracteres aleatorios. Se crea con `canjesctl keys create`."
+
+  parameters:
+    HolderRefOptional:
+      name: holderRef
+      in: query
+      required: false
+      description: Identificador opaco de la persona en la app emisora (nunca nombre ni correo)
+      schema: { type: string, minLength: 1, maxLength: 128 }
+      example: 8f3a2c1e-5b7d-4e2a-9c1f-0d6b3a8e7f21
+    HolderRefRequired:
+      name: holderRef
+      in: query
+      required: true
+      description: Identificador opaco de la persona en la app emisora (nunca nombre ni correo)
+      schema: { type: string, minLength: 1, maxLength: 128 }
+      example: 8f3a2c1e-5b7d-4e2a-9c1f-0d6b3a8e7f21
+    CodeID:
+      name: id
+      in: path
+      required: true
+      description: ID del código (`codeId`)
+      schema: { type: string, format: uuid }
+    PageSize:
+      name: size
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 500, default: 50 }
+    PageOffset:
+      name: offset
+      in: query
+      schema: { type: integer, minimum: 0, default: 0 }
+
+  headers:
+    RetryAfter:
+      description: Segundos a esperar antes de reintentar
+      schema: { type: integer, example: 60 }
+
+  responses:
+    Unauthorized:
+      description: "Falta la API key o no es válida (`UNAUTHORIZED`)"
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ApiError" }
+          example: { error: UNAUTHORIZED, message: "API key inválida." }
+    Forbidden:
+      description: "La key no tiene el scope de esta operación (`FORBIDDEN`)"
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ApiError" }
+          example: { error: FORBIDDEN, message: "Esta app no tiene permiso para esta operación." }
+    NotFound:
+      description: "`OFFER_NOT_FOUND` o `CODE_NOT_FOUND` según el endpoint"
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ApiError" }
+          example: { error: CODE_NOT_FOUND, message: "Este código no es válido para esta app." }
+    Conflict:
+      description: >-
+        `HOLDER_LIMIT_REACHED`, `OFFER_SOLD_OUT`, `CODE_ALREADY_REDEEMED`, `EMAIL_ALREADY_REDEEMED`
+        o `INVALID_STATE` según el endpoint
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ApiError" }
+          example: { error: CODE_ALREADY_REDEEMED, message: "Este código ya fue canjeado." }
+    Gone:
+      description: "`CAMPAIGN_NOT_ACTIVE`, `CODE_REVOKED` o `CODE_EXPIRED` según el endpoint"
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ApiError" }
+          example: { error: CODE_EXPIRED, message: "Este código venció." }
+    ValidationError:
+      description: "`VALIDATION_ERROR` o `INVALID_CODE_FORMAT`"
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ApiError" }
+          example: { error: INVALID_CODE_FORMAT, message: "Revisa el código: parece que hay un dígito mal escrito." }
+    TooManyRequests:
+      description: "Límite de intentos (`TOO_MANY_ATTEMPTS`)"
+      headers:
+        Retry-After: { $ref: "#/components/headers/RetryAfter" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ApiError" }
+          example: { error: TOO_MANY_ATTEMPTS, message: "Demasiados intentos. Espera un minuto." }
+    InternalError:
+      description: "Error inesperado (`INTERNAL_ERROR`). El detalle queda en los logs con el `X-Request-Id`."
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ApiError" }
+          example: { error: INTERNAL_ERROR, message: "Ocurrió un error inesperado. Intenta de nuevo." }
+
+  schemas:
+    ApiError:
+      type: object
+      required: [error, message]
+      properties:
+        error:
+          type: string
+          description: Código de error en MAYÚSCULAS; la app decide por este valor
+          example: CODE_ALREADY_REDEEMED
+        message:
+          type: string
+          description: Texto en español listo para mostrar a la persona
+          example: Este código ya fue canjeado.
+
+    Health:
+      type: object
+      required: [status]
+      properties:
+        status: { type: string, example: ok }
+
+    CodeStatus:
+      type: string
+      enum: [ISSUED, REDEEMED, FULFILLED, REVOKED]
+      description: |
+        Estado guardado. "Vencido" no es un estado: un `ISSUED` con `expiresAt` en el pasado se
+        trata como vencido (SD §3.1).
+
+    Benefit:
+      type: object
+      required: [type, value]
+      description: Beneficio de una oferta. La API no interpreta los tipos; solo los guarda y devuelve.
+      properties:
+        type: { type: string, example: FREE_MONTHS }
+        value: { type: number, example: 1 }
+
+    TargetApp:
+      type: object
+      required: [slug, name]
+      description: App donde se canjea la oferta
+      properties:
+        slug: { type: string, example: visorus-pos }
+        name: { type: string, example: VisorUS POS }
+
+    StoreLinks:
+      type: object
+      description: Enlaces de descarga de la app destino
+      properties:
+        ios: { type: string, example: "https://apps.apple.com/mx/app/id0000000000" }
+        android: { type: string, example: "https://play.google.com/store/apps/details?id=mx.visorus.pos" }
+
+    CampaignSummary:
+      type: object
+      required: [slug, endsAt]
+      properties:
+        slug: { type: string, example: ecf-piloto-2026-10 }
+        endsAt:
+          type: string
+          format: date-time
+          description: Hasta cuándo se puede emitir
+          example: "2026-10-21T05:59:00Z"
+
+    ActiveCode:
+      type: object
+      required: [codeId, last4, expiresAt]
+      description: Código vigente de la persona (sin el número completo)
+      properties:
+        codeId: { type: string, format: uuid }
+        last4: { type: string, pattern: "^[0-9]{4}$", example: "4821" }
+        expiresAt: { type: string, format: date-time, nullable: true }
+
+    HolderStatus:
+      type: object
+      required: [activeCode, redeemedCount, remaining]
+      properties:
+        activeCode:
+          type: object
+          allOf:
+            - $ref: "#/components/schemas/ActiveCode"
+          nullable: true
+          description: "`null` si la persona no tiene un código vigente para esta oferta"
+        redeemedCount: { type: integer, minimum: 0, example: 0 }
+        remaining:
+          type: integer
+          minimum: 0
+          description: Cuántos canjes más puede hacer la persona de esta oferta
+          example: 1
+
+    Offer:
+      type: object
+      required: [offerId, slug, title, description, benefits, costPoints, targetApp, storeLinks, soldOut, holder]
+      properties:
+        offerId: { type: string, format: uuid }
+        slug: { type: string, example: visorus-pos-1m-asesoria }
+        title: { type: string, example: "1 mes gratis de VisorUS POS + 1 h de asesoría" }
+        description: { type: string }
+        benefits:
+          type: array
+          items: { $ref: "#/components/schemas/Benefit" }
+        costPoints:
+          type: integer
+          nullable: true
+          description: Informativo para la app emisora; la API no maneja puntos (D15)
+          example: 1500
+        targetApp: { $ref: "#/components/schemas/TargetApp" }
+        storeLinks: { $ref: "#/components/schemas/StoreLinks" }
+        soldOut: { type: boolean, example: false }
+        holder:
+          type: object
+          allOf:
+            - $ref: "#/components/schemas/HolderStatus"
+          nullable: true
+          description: "`null` si no se envió `holderRef`"
+
+    OfferList:
+      type: object
+      required: [campaign, data]
+      properties:
+        campaign:
+          type: object
+          allOf:
+            - $ref: "#/components/schemas/CampaignSummary"
+          nullable: true
+          description: "`null` si la app no tiene una campaña activa"
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/Offer" }
+
+    IssueCodeRequest:
+      type: object
+      required: [offerId, holderRef]
+      properties:
+        offerId: { type: string, format: uuid }
+        holderRef:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: Identificador opaco de la persona en la app emisora
+      example:
+        offerId: 6b1f3c2a-9d4e-4f8a-b1c7-2e5d8a9f0b13
+        holderRef: 8f3a2c1e-5b7d-4e2a-9c1f-0d6b3a8e7f21
+
+    IssuedOffer:
+      type: object
+      required: [offerId, title, targetApp, storeLinks]
+      properties:
+        offerId: { type: string, format: uuid }
+        title: { type: string }
+        targetApp: { $ref: "#/components/schemas/TargetApp" }
+        storeLinks: { $ref: "#/components/schemas/StoreLinks" }
+
+    IssuedCode:
+      type: object
+      required: [codeId, code, codeDisplay, last4, offer, expiresAt, reissued]
+      properties:
+        codeId: { type: string, format: uuid }
+        code:
+          type: string
+          pattern: "^[0-9]{40}$"
+          description: Código completo. Solo aparece en esta respuesta.
+          example: "4821093755120864937102846619305527841930"
+        codeDisplay:
+          type: string
+          description: El mismo código en grupos de 4, para mostrar
+          example: "4821 0937 5512 0864 9371 0284 6619 3055 2784 1930"
+        last4: { type: string, pattern: "^[0-9]{4}$", example: "1930" }
+        offer: { $ref: "#/components/schemas/IssuedOffer" }
+        expiresAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: Hasta cuándo se puede canjear
+          example: "2026-11-01T05:59:59Z"
+        reissued:
+          type: boolean
+          description: "`true` si se revocó un código vigente anterior para la misma persona y oferta"
+          example: false
+
+    HolderCodeOffer:
+      type: object
+      required: [offerId, slug, title, targetApp]
+      properties:
+        offerId: { type: string, format: uuid }
+        slug: { type: string }
+        title: { type: string }
+        targetApp: { $ref: "#/components/schemas/TargetApp" }
+
+    HolderCode:
+      type: object
+      required: [codeId, last4, status, offer, issuedAt, redeemedAt, expiresAt]
+      properties:
+        codeId: { type: string, format: uuid }
+        last4: { type: string, pattern: "^[0-9]{4}$" }
+        status: { $ref: "#/components/schemas/CodeStatus" }
+        offer: { $ref: "#/components/schemas/HolderCodeOffer" }
+        issuedAt: { type: string, format: date-time }
+        redeemedAt: { type: string, format: date-time, nullable: true }
+        expiresAt: { type: string, format: date-time, nullable: true }
+
+    HolderCodeList:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/HolderCode" }
+
+    OfferBenefits:
+      type: object
+      required: [title, benefits]
+      properties:
+        title: { type: string, example: "1 mes gratis de VisorUS POS + 1 h de asesoría" }
+        benefits:
+          type: array
+          items: { $ref: "#/components/schemas/Benefit" }
+
+    ValidateCodeRequest:
+      type: object
+      required: [code]
+      properties:
+        code:
+          type: string
+          maxLength: 100
+          description: Código tal como lo escribió o pegó la persona (se aceptan espacios y guiones)
+      example:
+        code: "4821 0937 5512 0864 9371 0284 6619 3055 2784 1930"
+
+    ValidateCodeResponse:
+      type: object
+      required: [valid, offer, expiresAt]
+      properties:
+        valid: { type: boolean, example: true }
+        offer: { $ref: "#/components/schemas/OfferBenefits" }
+        expiresAt: { type: string, format: date-time, nullable: true, example: "2026-11-01T05:59:59Z" }
+
+    RedeemCodeRequest:
+      type: object
+      required: [code, email, redeemerRef, emailConsentAt, consentVersion]
+      properties:
+        code:
+          type: string
+          maxLength: 100
+          description: Código tal como lo escribió o pegó la persona
+        email:
+          type: string
+          maxLength: 254
+          description: Correo con el que se registró en la app destino. Se guarda en minúsculas.
+        redeemerRef:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: ID del usuario recién registrado en la app destino
+        emailConsentAt:
+          type: string
+          format: date-time
+          description: Cuándo aceptó la persona el aviso de uso de su correo
+        consentVersion:
+          type: string
+          minLength: 1
+          maxLength: 64
+          description: Versión del texto de consentimiento aceptado
+      example:
+        code: "4821 0937 5512 0864 9371 0284 6619 3055 2784 1930"
+        email: Persona@Gmail.com
+        redeemerRef: pos-user-91822
+        emailConsentAt: "2026-10-09T18:22:10Z"
+        consentVersion: pos-canje-v1
+
+    RedeemCodeResponse:
+      type: object
+      required: [codeId, status, offer, redeemedAt]
+      properties:
+        codeId: { type: string, format: uuid }
+        status: { $ref: "#/components/schemas/CodeStatus" }
+        offer: { $ref: "#/components/schemas/OfferBenefits" }
+        redeemedAt: { type: string, format: date-time, example: "2026-10-09T18:22:13Z" }
+
+    AdminCodeOffer:
+      type: object
+      required: [offerId, slug, title, campaignSlug]
+      properties:
+        offerId: { type: string, format: uuid }
+        slug: { type: string }
+        title: { type: string }
+        campaignSlug: { type: string }
+
+    AdminCode:
+      type: object
+      required:
+        - codeId
+        - offer
+        - last4
+        - holderRef
+        - status
+        - issuedAt
+        - expiresAt
+        - redeemedAt
+        - redeemedEmail
+        - redeemerRef
+        - fulfilledAt
+        - fulfilledNote
+        - revokedAt
+        - revokeReason
+      properties:
+        codeId: { type: string, format: uuid }
+        offer: { $ref: "#/components/schemas/AdminCodeOffer" }
+        last4: { type: string, pattern: "^[0-9]{4}$" }
+        holderRef: { type: string }
+        status: { $ref: "#/components/schemas/CodeStatus" }
+        issuedAt: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time, nullable: true }
+        redeemedAt: { type: string, format: date-time, nullable: true }
+        redeemedEmail: { type: string, nullable: true }
+        redeemerRef: { type: string, nullable: true }
+        fulfilledAt: { type: string, format: date-time, nullable: true }
+        fulfilledNote: { type: string, nullable: true }
+        revokedAt: { type: string, format: date-time, nullable: true }
+        revokeReason: { type: string, nullable: true }
+
+    AdminCodePage:
+      type: object
+      required: [data, total]
+      properties:
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/AdminCode" }
+        total: { type: integer, minimum: 0, example: 123 }
+
+    CodeEventType:
+      type: string
+      enum: [ISSUED, REVOKED, VALIDATE_OK, VALIDATE_FAILED, REDEEMED, REDEEM_FAILED, FULFILLED]
+
+    CodeEvent:
+      type: object
+      required: [id, type, clientApp, detail, ip, createdAt]
+      properties:
+        id: { type: integer, format: int64 }
+        type: { $ref: "#/components/schemas/CodeEventType" }
+        clientApp:
+          type: string
+          nullable: true
+          description: Slug de la app que provocó el evento
+        detail:
+          type: object
+          additionalProperties: true
+          description: Datos del evento (nunca el código ni el correo completos)
+          example: { reason: CODE_EXPIRED }
+        ip: { type: string, nullable: true }
+        createdAt: { type: string, format: date-time }
+
+    CodeEventList:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/CodeEvent" }
+
+    FulfillCodeRequest:
+      type: object
+      properties:
+        note:
+          type: string
+          maxLength: 500
+          example: Activado en POS el 10-oct
+
+    RevokeCodeRequest:
+      type: object
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 200
+          example: Uso sospechoso
+
+    OfferStats:
+      type: object
+      required: [offerId, slug, title, issued, active, redeemed, fulfilled, revoked, expired, validateFailed, redeemFailed]
+      properties:
+        offerId: { type: string, format: uuid }
+        slug: { type: string }
+        title: { type: string }
+        issued: { type: integer, description: Total emitidos }
+        active: { type: integer, description: "`ISSUED` no vencidos" }
+        redeemed: { type: integer, description: "`REDEEMED` (canjeados sin entregar)" }
+        fulfilled: { type: integer, description: "`FULFILLED`" }
+        revoked: { type: integer, description: "`REVOKED`" }
+        expired: { type: integer, description: "`ISSUED` vencidos" }
+        validateFailed: { type: integer, description: Eventos `VALIDATE_FAILED` }
+        redeemFailed: { type: integer, description: Eventos `REDEEM_FAILED` }
+
+    CampaignStats:
+      type: object
+      required: [campaign, data]
+      properties:
+        campaign: { $ref: "#/components/schemas/CampaignSummary" }
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/OfferStats" }
